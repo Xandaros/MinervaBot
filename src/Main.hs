@@ -6,23 +6,37 @@ module Main where
 import           Control.Applicative ((<|>))
 import           Control.Lens
 import           Control.Monad.Reader
-import           Data.Maybe (isJust, listToMaybe, isNothing, catMaybes)
+import           Data.Maybe (isJust, listToMaybe, isNothing, catMaybes, fromMaybe)
 import           Data.Monoid ((<>))
+import           Data.String (IsString)
 import qualified Data.Text as T
 import           Data.Text (Text)
 import qualified Data.Text.IO as TIO
-import           Data.Time.Clock (getCurrentTime, UTCTime)
+import           Data.Time.Calendar (toGregorian, Day(..))
+import           Data.Time.Clock (getCurrentTime, UTCTime(..))
+import           Data.Time.Format (parseTimeM, defaultTimeLocale, iso8601DateFormat)
 import           Database.Persist
 import           Database.Persist.Sqlite
 import           Database.Persist.TH
 import           Network.Discord hiding (insert)
-import           Pipes (Proxy, X)
+import           Pipes (Proxy, X, yield, runEffect, for)
 import           System.Environment (getArgs)
 import           System.Exit (exitSuccess)
 import           System.Process (callProcess)
 
 import DB
 import           Patreon hiding (Patron)
+
+serverPath :: FilePath
+serverPath = "/home/msm/servers/"
+
+msm :: [String] -> IO ()
+msm = callProcess "msm"
+
+servers :: [(Text, Int)]
+servers = [ ("patreon", 500)
+          , ("anarchy", 1000)
+          ]
 
 createPatron :: MonadIO m => Text -> ReaderT SqlBackend m ()
 createPatron discord = do
@@ -55,10 +69,23 @@ setAccountName command fieldActive fieldStandby Message{..} =
                  else fetch' $ CreateMessage messageChannel
                                  ("Your nickname has been set to " <> minecraftUser <> " and will become active next month") Nothing
 
+isPledgeEligible :: Int -> Day -> Pledge -> Bool
+isPledgeEligible minPledge today pledge = and [ pledge ^. amount >= minPledge
+                                              , isNothing $ pledge ^. declinedSince
+                                              , fromMaybe False $ lastMonthOrOlder (pledge ^. pledgedSince . to T.unpack)
+                                              ]
+    where
+        lastMonthOrOlder date = do
+            parsedDate <- parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S")) $ takeWhile (/='.') date
+            let (year, month, _) = toGregorian . utctDay $ parsedDate
+                (tyear, tmonth, _) = toGregorian today
+            pure $ tyear > year || tmonth > month
+
 whiteList :: Text -> Int -> [Pledge] -> IO ()
 whiteList server minPledge pledges = do
-    let eligiblePledges = filter (isNothing . view declinedSince) . filter ((>=minPledge) . view amount) $ pledges
-        discordIds = catMaybes $ view discord <$> eligiblePledges
+    now <- getCurrentTime
+    let eligiblePledges = filter (isPledgeEligible minPledge (utctDay now)) $ pledges
+        discordIds      = catMaybes $ view discord <$> eligiblePledges
     patrons <- runSqlite database . asSqlBackend $ getPatron `mapM` discordIds >>= pure . fmap entityVal . catMaybes >>= mapM activateStandbys
     let players = catMaybes $ view minecraftPlayerActive <$> patrons
 
@@ -75,11 +102,15 @@ whiteList server minPledge pledges = do
                            & minecraftPlayerStandby .~ Nothing
                            & minecraftSpectatorActive .~ spectator
                            & minecraftSpectatorStandby .~ Nothing
-         msm = callProcess "echo"
 
 whiteListPlayers :: [Pledge] -> IO ()
-whiteListPlayers pledges = whiteList "patreon" 500 pledges >> whiteList "anarchy" 1000 pledges
-        
+whiteListPlayers pledges = void . sequence $ ($ pledges) . uncurry whiteList <$> servers
+
+clearWhitelist :: Text -> IO ()
+clearWhitelist server = do
+    let path = serverPath <> T.unpack server <> "/whitelist.json"
+    writeFile path "[]"
+    msm [T.unpack server, "cmd", "whitelist", "reload"]
 
 helpStr :: Text
 helpStr = T.unlines $
@@ -93,7 +124,7 @@ helpStr = T.unlines $
 discordBot :: DiscordCredentials -> IO ()
 discordBot credentials = do
     runBot (Bot $ credentials ^. token . to T.unpack) $ do
-        with ReadyEvent $ \(Init v u _ _ _) ->
+        with ReadyEvent $ \(Init v u _ _ _) -> do
             liftIO . putStrLn $ "Connected to gateway " ++ show v ++ " as user " ++ show u
 
         with MessageCreateEvent $ \message@Message{..} -> do
@@ -116,6 +147,7 @@ main = do
     if "--whitelist" `elem` args
       then do
           Right pledges <- getPledges $ credentials ^. patreon
+          sequence $ clearWhitelist . fst <$> servers
           whiteListPlayers pledges
       else discordBot $ credentials ^. discord
 

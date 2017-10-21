@@ -177,9 +177,8 @@ getPledges' cursor creds =
                             Just next -> case parseCursor next of
                                            Nothing -> pure $ Right [response]
                                            Just nextCursor -> do
-                                               --nextPledges <- getPledges' (Just nextCursor) creds
-                                               --pure $ (response :) <$> nextPledges
-                                               pure $ (response :) <$> pure []
+                                               nextPledges <- getPledges' (Just nextCursor) creds
+                                               pure $ (response :) <$> nextPledges
 
 
 refreshToken :: PatreonCredentials -> IO (Either ServantError PatreonCredentials)
