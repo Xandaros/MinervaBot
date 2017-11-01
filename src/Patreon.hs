@@ -162,6 +162,11 @@ pledgeResponseToPledges resp =
     where discordLookup :: [Patron] -> Map.Map Text Text
           discordLookup = Map.fromList . fmap (\(Patron uid did) -> (uid, did))
 
+getDiscordPledge :: PatreonCredentials -> Text -> IO (Maybe Pledge)
+getDiscordPledge creds discordId = getPledges creds >>= \case
+    Left err -> pure $ Nothing
+    Right pledges -> pure . listToMaybe . filter ((==Just discordId) . view discord) $ pledges
+
 getPledges :: PatreonCredentials -> IO (Either ServantError [Pledge])
 getPledges creds = getPledges' Nothing creds >>= \case
     Left err -> pure $ Left err

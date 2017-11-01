@@ -1,6 +1,6 @@
 {-# LANGUAGE RecordWildCards, OverloadedStrings, TemplateHaskell, QuasiQuotes, TypeFamilies, EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts, GADTs, GeneralizedNewtypeDeriving, MultiParamTypeClasses, FunctionalDependencies #-}
-{-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE PartialTypeSignatures, LambdaCase #-}
 module Main where
 
 import           Control.Applicative ((<|>))
@@ -45,8 +45,9 @@ createPatron discord = do
         insert $ Patron Nothing discord Nothing Nothing Nothing Nothing
         pure ()
 
-setAccountName :: Text -> EntityField Patron (Maybe Text) -> EntityField Patron (Maybe Text) -> Message -> Proxy X () c c' DiscordM ()
-setAccountName command fieldActive fieldStandby Message{..} =
+setAccountName :: Text -> EntityField Patron (Maybe Text) -> EntityField Patron (Maybe Text) -> Message -> Bool -> Credentials
+               -> Proxy X () c c' DiscordM ()
+setAccountName command fieldActive fieldStandby Message{..} autowhitelist creds =
     when (command `T.isPrefixOf` messageContent) $ do
         let author = T.pack . show $ userId messageAuthor
             authorMention = "<@" <> author <> ">"
@@ -65,7 +66,12 @@ setAccountName command fieldActive fieldStandby Message{..} =
                          updateWhere [DiscordId ==. author] [fieldStandby =. Just minecraftUser]
                          pure False
                if created
-                 then fetch' $ CreateMessage messageChannel ("Your nickname has been set to " <> minecraftUser) Nothing
+                 then do
+                     fetch' $ CreateMessage messageChannel ("Your nickname has been set to " <> minecraftUser) Nothing
+                     --liftIO . when autowhitelist $ pure (Just (head mockPledges)) >>= \case
+                     liftIO . when autowhitelist $ getDiscordPledge (creds ^. patreon) author >>= \case
+                        Nothing -> pure ()
+                        Just pledge -> whiteListPlayers [pledge]
                  else fetch' $ CreateMessage messageChannel
                                  ("Your nickname has been set to " <> minecraftUser <> " and will become active next month") Nothing
 
@@ -76,7 +82,7 @@ isPledgeEligible minPledge today pledge = and [ pledge ^. amount >= minPledge
                                               ]
     where
         lastMonthOrOlder date = do
-            parsedDate <- parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S")) $ takeWhile (/='.') date
+            parsedDate <- parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S")) $ takeWhile (/='+') date
             let (year, month, _) = toGregorian . utctDay $ parsedDate
                 (tyear, tmonth, _) = toGregorian today
             pure $ tyear > year || tmonth > month
@@ -121,17 +127,17 @@ helpStr = T.unlines $
     , "**Please note:** You will not be able to change your nickname for one month after you set it, so make sure it is correct!"
     ]
 
-discordBot :: DiscordCredentials -> IO ()
+discordBot :: Credentials -> IO ()
 discordBot credentials = do
-    runBot (Bot $ credentials ^. token . to T.unpack) $ do
+    runBot (Bot $ credentials ^. discord ^. token . to T.unpack) $ do
         with ReadyEvent $ \(Init v u _ _ _) -> do
             liftIO . putStrLn $ "Connected to gateway " ++ show v ++ " as user " ++ show u
 
         with MessageCreateEvent $ \message@Message{..} -> do
             when ("!help" `T.isPrefixOf` messageContent) $ do
                 fetch' $ CreateMessage messageChannel helpStr Nothing
-            setAccountName "!player" MinecraftPlayerActive MinecraftPlayerStandby message
-            setAccountName "!spectator" MinecraftSpectatorActive MinecraftSpectatorStandby message
+            setAccountName "!player" MinecraftPlayerActive MinecraftPlayerStandby message True credentials
+            setAccountName "!spectator" MinecraftSpectatorActive MinecraftSpectatorStandby message False credentials
 
 main :: IO ()
 main = do
@@ -149,7 +155,7 @@ main = do
           Right pledges <- getPledges $ credentials ^. patreon
           sequence $ clearWhitelist . fst <$> servers
           whiteListPlayers pledges
-      else discordBot $ credentials ^. discord
+      else discordBot credentials
 
 
 mockPledges :: [Pledge]
